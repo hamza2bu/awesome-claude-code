@@ -1,0 +1,13 @@
+# The repository root ignores every `lib/` directory (Python packaging); re-include ours.
+!src/lib/
+
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+.env
+.env.local
+.uploads/
+public/seed/
+public/uploads/

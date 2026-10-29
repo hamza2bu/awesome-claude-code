@@ -1,0 +1,42 @@
+name: Marketplace CI
+
+on:
+  pull_request:
+    paths: ["marketplace/**", ".github/workflows/marketplace-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["marketplace/**", ".github/workflows/marketplace-ci.yml"]
+
+defaults:
+  run:
+    working-directory: marketplace
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: marketplace
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/marketplace?schema=public
+      AUTH_SECRET: ci-secret-not-for-production-use-only
+      PAYMENT_PROVIDER: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: marketplace/package-lock.json
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

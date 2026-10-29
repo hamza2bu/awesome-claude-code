@@ -1,0 +1,298 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  VENDOR
+  ADMIN
+}
+
+enum ShopStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PARTIALLY_FULFILLED
+  FULFILLED
+  CANCELLED
+  REFUNDED
+}
+
+enum VendorOrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum PayoutStatus {
+  NOT_DUE
+  PENDING
+  TRANSFERRED
+  FAILED
+  REVERSED
+}
+
+// ─── Auth.js ────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  role          Role      @default(CUSTOMER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts Account[]
+  sessions Session[]
+  shop     Shop?
+  orders   Order[]
+  reviews  Review[]
+}
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
+// ─── Marketplace ────────────────────────────────────────────────────────────
+
+model Shop {
+  id          String     @id @default(cuid())
+  ownerId     String     @unique
+  name        String
+  slug        String     @unique
+  description String?
+  logoUrl     String?
+  bannerUrl   String?
+  status      ShopStatus @default(PENDING)
+  /// Per-shop commission override in basis points (1250 = 12.5%). Null → platform default.
+  commissionBps Int?
+
+  /// Payment provider connected account (Stripe Connect `acct_...`).
+  stripeAccountId String? @unique
+  payoutsEnabled  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner        User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  products     Product[]
+  vendorOrders VendorOrder[]
+
+  @@index([status])
+}
+
+model Category {
+  id       String     @id @default(cuid())
+  name     String
+  slug     String     @unique
+  parentId String?
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryTree")
+  products Product[]
+}
+
+model Product {
+  id             String        @id @default(cuid())
+  shopId         String
+  categoryId     String?
+  title          String
+  slug           String        @unique
+  description    String
+  priceCents     Int
+  compareAtCents Int?
+  currency       String        @default("usd")
+  stock          Int           @default(0)
+  sku            String?
+  status         ProductStatus @default(DRAFT)
+  ratingAvg      Float         @default(0)
+  ratingCount    Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  shop       Shop           @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  category   Category?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  images     ProductImage[]
+  orderItems OrderItem[]
+  reviews    Review[]
+
+  @@index([shopId, status])
+  @@index([categoryId, status])
+  @@index([status, createdAt])
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  url       String
+  /// Storage key (Cloudinary public_id / S3 object key) used for deletion.
+  storageKey String?
+  alt       String?
+  position  Int     @default(0)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, position])
+}
+
+/// A customer checkout. One order spans many shops and is paid with a single charge.
+model Order {
+  id         String      @id @default(cuid())
+  number     String      @unique
+  customerId String
+  status     OrderStatus @default(PENDING_PAYMENT)
+  currency   String      @default("usd")
+
+  subtotalCents   Int
+  shippingCents   Int @default(0)
+  totalCents      Int
+  commissionCents Int
+
+  shippingName       String
+  shippingLine1      String
+  shippingLine2      String?
+  shippingCity       String
+  shippingPostalCode String
+  shippingCountry    String
+  shippingPhone      String?
+
+  paymentProvider  String
+  /// Stripe PaymentIntent / Checkout Session id or local provider reference.
+  paymentRef       String?  @unique
+  /// Groups the vendor transfers created for this order (Stripe `transfer_group`).
+  transferGroup    String   @unique
+  paidAt           DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  customer     User          @relation(fields: [customerId], references: [id])
+  vendorOrders VendorOrder[]
+
+  @@index([customerId, createdAt])
+  @@index([status, createdAt])
+}
+
+/// The part of an order fulfilled by a single shop. Commission and payout are computed here.
+model VendorOrder {
+  id      String            @id @default(cuid())
+  orderId String
+  shopId  String
+  status  VendorOrderStatus @default(PENDING_PAYMENT)
+
+  subtotalCents   Int
+  shippingCents   Int @default(0)
+  /// Commission rate captured at checkout so later rate changes don't rewrite history.
+  commissionBps   Int
+  commissionCents Int
+  payoutCents     Int
+
+  payoutStatus PayoutStatus @default(NOT_DUE)
+  transferId   String?
+  trackingCode String?
+  shippedAt    DateTime?
+  deliveredAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  shop  Shop        @relation(fields: [shopId], references: [id])
+  items OrderItem[]
+
+  @@unique([orderId, shopId])
+  @@index([shopId, createdAt])
+}
+
+model OrderItem {
+  id            String  @id @default(cuid())
+  vendorOrderId String
+  productId     String?
+  /// Snapshot of the product at purchase time.
+  title         String
+  imageUrl      String?
+  unitCents     Int
+  quantity      Int
+  lineCents     Int
+
+  vendorOrder VendorOrder @relation(fields: [vendorOrderId], references: [id], onDelete: Cascade)
+  product     Product?    @relation(fields: [productId], references: [id], onDelete: SetNull)
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  productId String
+  userId    String
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, userId])
+}
+
+/// Idempotency log for payment-provider webhooks.
+model WebhookEvent {
+  id         String   @id
+  provider   String
+  type       String
+  receivedAt DateTime @default(now())
+}
